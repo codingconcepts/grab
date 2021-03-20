@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -14,14 +15,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codingconcepts/grab/lock"
 	"github.com/codingconcepts/grab/models"
+	"github.com/codingconcepts/grab/state"
 	"github.com/spf13/cobra"
 )
 
 const (
-	lockFile = "grab_lock"
-	grabBin  = "bin"
+	stateFile = "grab_state.json"
+	grabBin   = "bin"
 )
 
 func main() {
@@ -53,23 +54,23 @@ func main() {
 		RunE:    update(c, config),
 	}
 
-	deleteCmd := &cobra.Command{
-		Use:     "delete",
-		Short:   "Deletes a package",
-		Example: "grab delete codingconcepts pa55",
+	removeCmd := &cobra.Command{
+		Use:     "remove",
+		Short:   "Removes a package",
+		Example: "grab remove codingconcepts pa55",
 		Args:    cobra.ExactArgs(2),
-		RunE:    delete(config),
+		RunE:    remove(config),
 	}
 
 	rootCmd := &cobra.Command{}
-	rootCmd.AddCommand(installCmd, updateCmd, deleteCmd)
+	rootCmd.AddCommand(installCmd, updateCmd, removeCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func install(c *http.Client, cfg lock.Config) func(cmd *cobra.Command, args []string) error {
+func install(c *http.Client, cfg state.Config) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		owner := args[0]
 		repo := args[1]
@@ -86,11 +87,11 @@ func install(c *http.Client, cfg lock.Config) func(cmd *cobra.Command, args []st
 		}
 		release.Owner = owner
 		release.Repo = repo
+		release.InstalledPath = path.Join(cfg.BinDirPath, path.Base(release.URL))
 
 		// Check whether a version of this file has already been downloaded and
 		// if so, bail with a message telling the user to update instead.
-		fullPath := path.Join(cfg.BinDirPath, path.Base(release.URL))
-		if _, err := os.Stat(fullPath); !os.IsNotExist(err) {
+		if _, err := os.Stat(release.InstalledPath); !os.IsNotExist(err) {
 			log.Println("a version for this app already exists, consider running update instead")
 			return nil
 		}
@@ -100,23 +101,41 @@ func install(c *http.Client, cfg lock.Config) func(cmd *cobra.Command, args []st
 			return fmt.Errorf("downloading release: %w", err)
 		}
 
-		// Update lock file.
-		if err = lock.WriteLockFile(cfg.LockFilePath, release); err != nil {
-			return fmt.Errorf("writing locking file: %w", err)
+		// Update state file.
+		if err = state.WriteStateFile(cfg.StateFilePath, release); err != nil {
+			return fmt.Errorf("writing state file: %w", err)
 		}
 
 		return nil
 	}
 }
 
-func update(c *http.Client, cfg lock.Config) func(cmd *cobra.Command, args []string) error {
+func update(c *http.Client, cfg state.Config) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 }
 
-func delete(cfg lock.Config) func(cmd *cobra.Command, args []string) error {
+func remove(cfg state.Config) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
+		owner := args[0]
+		repo := args[1]
+
+		// Check for an existing package.
+		release, err := state.GetRelease(cfg.StateFilePath, owner, repo)
+		if err != nil {
+			if errors.Is(err, &models.ErrNotFound{}) {
+				log.Printf("no installed packages for owner=%q repo=%q", owner, repo)
+				return nil
+			}
+		}
+
+		log.Println(release)
+
+		// Remove application.
+
+		// Remove from state.
+
 		return nil
 	}
 }
@@ -165,11 +184,11 @@ func getRelease(c *http.Client, owner, repo, version string) (models.Release, er
 	return models.Release{}, fmt.Errorf("no releases found for this os")
 }
 
-func ensureGrabDir(baseDir string) (lock.Config, error) {
+func ensureGrabDir(baseDir string) (state.Config, error) {
 	// Initialise the config parameters.
-	config := lock.Config{
-		LockFilePath: path.Join(baseDir, lockFile),
-		BinDirPath:   path.Join(baseDir, grabBin),
+	config := state.Config{
+		StateFilePath: path.Join(baseDir, stateFile),
+		BinDirPath:    path.Join(baseDir, grabBin),
 	}
 
 	// If the grab dir already exists, there's nothing to do.
@@ -182,16 +201,16 @@ func ensureGrabDir(baseDir string) (lock.Config, error) {
 		return config, fmt.Errorf("creating directory %q: %w", baseDir, err)
 	}
 
-	// Create the lock file.
-	fullPath := path.Join(baseDir, lockFile)
+	// Create the state file.
+	fullPath := path.Join(baseDir, stateFile)
 	if err := ioutil.WriteFile(fullPath, []byte(`{}`), 0644); err != nil {
-		return config, fmt.Errorf("writing lock file %q: %w", fullPath, err)
+		return config, fmt.Errorf("writing state file %q: %w", fullPath, err)
 	}
 
 	return config, nil
 }
 
-func download(release models.Release, cfg lock.Config) error {
+func download(release models.Release, cfg state.Config) error {
 	// Download file.
 	resp, err := http.Get(release.URL)
 	if err != nil {
