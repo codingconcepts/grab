@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -13,12 +14,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codingconcepts/grab/lock"
 	"github.com/codingconcepts/grab/models"
 	"github.com/spf13/cobra"
 )
 
+const (
+	lockFile = "grab_lock"
+	grabBin  = "bin"
+)
+
 func main() {
 	log.SetFlags(0)
+
+	dir := "./grab"
+	config, err := ensureGrabDir(dir)
+	if err != nil {
+		log.Fatalf("error ensuring grab directory: %v", err)
+	}
 
 	c := &http.Client{
 		Timeout: time.Second * 5,
@@ -29,7 +42,7 @@ func main() {
 		Short:   "Installs a package",
 		Example: "grab install codingconcepts pa55 [VERSION]",
 		Args:    cobra.RangeArgs(2, 3),
-		RunE:    install(c),
+		RunE:    install(c, config),
 	}
 
 	updateCmd := &cobra.Command{
@@ -37,7 +50,7 @@ func main() {
 		Short:   "Updates a package",
 		Example: "grab update codingconcepts pa55 [VERSION]",
 		Args:    cobra.RangeArgs(2, 3),
-		RunE:    update(c),
+		RunE:    update(c, config),
 	}
 
 	deleteCmd := &cobra.Command{
@@ -45,7 +58,7 @@ func main() {
 		Short:   "Deletes a package",
 		Example: "grab delete codingconcepts pa55",
 		Args:    cobra.ExactArgs(2),
-		RunE:    delete,
+		RunE:    delete(config),
 	}
 
 	rootCmd := &cobra.Command{}
@@ -56,7 +69,7 @@ func main() {
 	}
 }
 
-func install(c *http.Client) func(cmd *cobra.Command, args []string) error {
+func install(c *http.Client, cfg lock.Config) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		owner := args[0]
 		repo := args[1]
@@ -66,89 +79,149 @@ func install(c *http.Client) func(cmd *cobra.Command, args []string) error {
 			version = args[2]
 		}
 
+		// Get the required version of the release (or latest if not specified).
 		release, err := getRelease(c, owner, repo, version)
 		if err != nil {
-			log.Fatalf("error: %v", err)
+			return fmt.Errorf("getting release: %w", err)
+		}
+		release.Owner = owner
+		release.Repo = repo
+
+		// Check whether a version of this file has already been downloaded and
+		// if so, bail with a message telling the user to update instead.
+		fullPath := path.Join(cfg.BinDirPath, path.Base(release.URL))
+		if _, err := os.Stat(fullPath); !os.IsNotExist(err) {
+			log.Println("a version for this app already exists, consider running update instead")
+			return nil
 		}
 
-		if err = download(release); err != nil {
-			log.Fatalf("error: %v", err)
+		// Download the version found.
+		if err = download(release, cfg); err != nil {
+			return fmt.Errorf("downloading release: %w", err)
 		}
+
+		// Update lock file.
+		if err = lock.WriteLockFile(cfg.LockFilePath, release); err != nil {
+			return fmt.Errorf("writing locking file: %w", err)
+		}
+
 		return nil
 	}
 }
 
-func update(c *http.Client) func(cmd *cobra.Command, args []string) error {
+func update(c *http.Client, cfg lock.Config) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 }
 
-func delete(cmd *cobra.Command, args []string) error {
-	return nil
+func delete(cfg lock.Config) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		return nil
+	}
 }
 
-func getRelease(c *http.Client, owner, repo, version string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100&page=%d", owner, repo, 1)
+func getRelease(c *http.Client, owner, repo, version string) (models.Release, error) {
+	perPage := 1
+	if version != "" {
+		perPage = 100
+	}
+
+	url := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/releases?per_page=%d&page=%d",
+		owner, repo, perPage, 1)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating releases request: %w", err)
+		return models.Release{}, fmt.Errorf("creating releases request: %w", err)
 	}
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetching releases: %w", err)
+		return models.Release{}, fmt.Errorf("fetching releases: %w", err)
 	}
+
+	// TODO: Use if we've received a version parameter and it's not on the page.
+	// log.Println(linkheader.Parse(resp.Header.Get("Link")))
 
 	var releases []models.GitRelease
 	if err = json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return "", fmt.Errorf("reading releases: %w", err)
+		return models.Release{}, fmt.Errorf("reading releases: %w", err)
 	}
 
 	if len(releases) == 0 {
-		return "", fmt.Errorf("no releases found")
+		return models.Release{}, fmt.Errorf("no releases found")
 	}
 
 	for _, asset := range releases[0].Assets {
 		if strings.HasSuffix(asset.BrowserDownloadURL, "_"+runtime.GOOS) {
-			return asset.BrowserDownloadURL, nil
+			return models.Release{
+				Version: releases[0].TagName,
+				URL:     asset.BrowserDownloadURL,
+			}, nil
 		}
 	}
 
-	return "", fmt.Errorf("no releases found for this os")
+	return models.Release{}, fmt.Errorf("no releases found for this os")
 }
 
-func download(url string) error {
-	// Create file.
-	file := path.Base(url)
-
-	log.Printf("creating file %q", file)
-	out, err := os.Create(file)
-	if err != nil {
-		return fmt.Errorf("creating file %q: %w", file, err)
+func ensureGrabDir(baseDir string) (lock.Config, error) {
+	// Initialise the config parameters.
+	config := lock.Config{
+		LockFilePath: path.Join(baseDir, lockFile),
+		BinDirPath:   path.Join(baseDir, grabBin),
 	}
-	defer out.Close()
 
-	resp, err := http.Get(url)
+	// If the grab dir already exists, there's nothing to do.
+	if _, err := os.Stat(baseDir); !os.IsNotExist(err) {
+		return config, nil
+	}
+
+	// Create the grab dir.
+	if err := os.MkdirAll(config.BinDirPath, os.ModePerm); err != nil {
+		return config, fmt.Errorf("creating directory %q: %w", baseDir, err)
+	}
+
+	// Create the lock file.
+	fullPath := path.Join(baseDir, lockFile)
+	if err := ioutil.WriteFile(fullPath, []byte(`{}`), 0644); err != nil {
+		return config, fmt.Errorf("writing lock file %q: %w", fullPath, err)
+	}
+
+	return config, nil
+}
+
+func download(release models.Release, cfg lock.Config) error {
+	// Download file.
+	resp, err := http.Get(release.URL)
 	if err != nil {
-		return fmt.Errorf("downloading release file %q: %w", url, err)
+		return fmt.Errorf("downloading release file %q: %w", release.URL, err)
 	}
 	defer resp.Body.Close()
 
+	// Create file.
+	fileName := path.Join(cfg.BinDirPath, path.Base(release.URL))
+
+	log.Printf("creating file %q", fileName)
+	out, err := os.Create(fileName)
+	if err != nil {
+		return fmt.Errorf("creating file %q: %w", fileName, err)
+	}
+	defer out.Close()
+
 	// Write file.
-	log.Printf("writing file %q", file)
+	log.Printf("writing file %q", fileName)
 	if _, err = io.Copy(out, resp.Body); err != nil {
-		return fmt.Errorf("writing file %q: %w", url, err)
+		return fmt.Errorf("writing file %q: %w", fileName, err)
 	}
 
 	// Make file executable.
-	log.Printf("making file %q executable", file)
-	cmd := exec.Command("chmod", "+x", file)
+	log.Printf("making file %q executable", fileName)
+	cmd := exec.Command("chmod", "+x", fileName)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err = cmd.Run(); err != nil {
-		return fmt.Errorf("making file %q writable: %w", url, err)
+		return fmt.Errorf("making file %q writable: %w", release.URL, err)
 	}
 
 	return nil
