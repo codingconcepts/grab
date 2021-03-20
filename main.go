@@ -14,25 +14,82 @@ import (
 	"time"
 
 	"github.com/codingconcepts/grab/models"
+	"github.com/spf13/cobra"
 )
 
 func main() {
+	log.SetFlags(0)
+
 	c := &http.Client{
 		Timeout: time.Second * 5,
 	}
 
-	release, err := getRelease(c, os.Args[1], os.Args[2])
-	if err != nil {
-		log.Fatalf("error: %v", err)
+	installCmd := &cobra.Command{
+		Use:     "install",
+		Short:   "Installs a package",
+		Example: "grab install codingconcepts pa55 [VERSION]",
+		Args:    cobra.RangeArgs(2, 3),
+		RunE:    install(c),
 	}
 
-	if err = download(release); err != nil {
-		log.Fatalf("error: %v", err)
+	updateCmd := &cobra.Command{
+		Use:     "update",
+		Short:   "Updates a package",
+		Example: "grab update codingconcepts pa55 [VERSION]",
+		Args:    cobra.RangeArgs(2, 3),
+		RunE:    update(c),
+	}
+
+	deleteCmd := &cobra.Command{
+		Use:     "delete",
+		Short:   "Deletes a package",
+		Example: "grab delete codingconcepts pa55",
+		Args:    cobra.ExactArgs(2),
+		RunE:    delete,
+	}
+
+	rootCmd := &cobra.Command{}
+	rootCmd.AddCommand(installCmd, updateCmd, deleteCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal(err)
 	}
 }
 
-func getRelease(c *http.Client, owner, repo string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=1", owner, repo)
+func install(c *http.Client) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		owner := args[0]
+		repo := args[1]
+
+		var version string
+		if len(args) > 2 {
+			version = args[2]
+		}
+
+		release, err := getRelease(c, owner, repo, version)
+		if err != nil {
+			log.Fatalf("error: %v", err)
+		}
+
+		if err = download(release); err != nil {
+			log.Fatalf("error: %v", err)
+		}
+		return nil
+	}
+}
+
+func update(c *http.Client) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		return nil
+	}
+}
+
+func delete(cmd *cobra.Command, args []string) error {
+	return nil
+}
+
+func getRelease(c *http.Client, owner, repo, version string) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=100&page=%d", owner, repo, 1)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
