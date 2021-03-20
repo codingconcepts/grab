@@ -76,6 +76,26 @@ func WriteStateFile(path string, release models.Release) error {
 	}
 	owners[release.Owner][release.Repo] = release
 
+	return writeStateFile(path, owners)
+}
+
+// RemoveRelease removes an application from the state file.
+func RemoveRelease(path string, release models.Release) error {
+	// Fetch all.
+	owners, err := ListOwners(path)
+	if err != nil {
+		return fmt.Errorf("reading state file %q: %w", path, err)
+	}
+
+	// Remove the one we care about.
+	foundOwner := owners[release.Owner]
+	delete(foundOwner, release.Repo)
+
+	// Write back to file.
+	return writeStateFile(path, owners)
+}
+
+func writeStateFile(path string, owners Owners) error {
 	// Overwrite the file with the updated content.
 	f, err := os.Create(path)
 	if err != nil {

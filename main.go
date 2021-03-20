@@ -130,11 +130,9 @@ func remove(cfg state.Config) func(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		log.Println(release)
-
-		// Remove application.
-
-		// Remove from state.
+		if err = removeRelease(cfg, owner, repo, release); err != nil {
+			return fmt.Errorf("removing release: %w", err)
+		}
 
 		return nil
 	}
@@ -241,6 +239,19 @@ func download(release models.Release, cfg state.Config) error {
 	cmd.Stderr = os.Stderr
 	if err = cmd.Run(); err != nil {
 		return fmt.Errorf("making file %q writable: %w", release.URL, err)
+	}
+
+	return nil
+}
+
+func removeRelease(cfg state.Config, owner, repo string, release models.Release) error {
+	log.Printf("removing file %q", release.InstalledPath)
+	if err := os.Remove(release.InstalledPath); err != nil {
+		return fmt.Errorf("removing file %q: %w", release.InstalledPath, err)
+	}
+
+	if err := state.RemoveRelease(cfg.StateFilePath, release); err != nil {
+		return fmt.Errorf("removing from state file: %w", err)
 	}
 
 	return nil
