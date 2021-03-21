@@ -51,12 +51,12 @@ func GetRelease(path, owner, repo string) (models.Release, error) {
 	}
 
 	if _, ok := owners[owner]; !ok {
-		return models.Release{}, models.NewErrNotFound("no packages for owner %q", owner)
+		return models.Release{}, models.MakeErrNotFound("no packages for owner %q", owner)
 	}
 
 	release, ok := owners[owner][repo]
 	if !ok {
-		return models.Release{}, models.NewErrNotFound("no packages for repo %q", repo)
+		return models.Release{}, models.MakeErrNotFound("no packages for repo %q", repo)
 	}
 
 	return release, nil

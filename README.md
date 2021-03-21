@@ -28,3 +28,5 @@ The lock file is the same as the state file but just for the current operation. 
 * Ensure the well-known "grab" directory is in the user's path.
 
 * Process multiple pages if a version was specified until that version is found.
+
+* Allow users to use basic auth or tokens in increase rate-limit.

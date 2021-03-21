@@ -23,6 +23,8 @@ import (
 const (
 	stateFile = "grab_state.json"
 	grabBin   = "bin"
+
+	releasesPerPage = 100
 )
 
 func main() {
@@ -80,11 +82,26 @@ func install(c *http.Client, cfg state.Config) func(cmd *cobra.Command, args []s
 			version = args[2]
 		}
 
+		var release models.Release
+		var err error
+
 		// Get the required version of the release (or latest if not specified).
-		release, err := getRelease(c, owner, repo, version)
-		if err != nil {
-			return fmt.Errorf("getting release: %w", err)
+		if version != "" {
+			release, err = getVersionedRelease(c, owner, repo, version)
+			if err != nil {
+				if errors.As(err, &models.ErrNotFound{}) {
+					log.Println(err)
+					return nil
+				}
+				return fmt.Errorf("getting release: %w", err)
+			}
+		} else {
+			release, err = getLatestRelease(c, owner, repo)
+			if err != nil {
+				return fmt.Errorf("getting release: %w", err)
+			}
 		}
+
 		release.Owner = owner
 		release.Repo = repo
 		release.InstalledPath = path.Join(cfg.BinDirPath, path.Base(release.URL))
@@ -138,32 +155,10 @@ func remove(cfg state.Config) func(cmd *cobra.Command, args []string) error {
 	}
 }
 
-func getRelease(c *http.Client, owner, repo, version string) (models.Release, error) {
-	perPage := 1
-	if version != "" {
-		perPage = 100
-	}
-
-	url := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/releases?per_page=%d&page=%d",
-		owner, repo, perPage, 1)
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func getLatestRelease(c *http.Client, owner, repo string) (models.Release, error) {
+	releases, err := getReleases(c, owner, repo, 1, 1)
 	if err != nil {
-		return models.Release{}, fmt.Errorf("creating releases request: %w", err)
-	}
-
-	resp, err := c.Do(req)
-	if err != nil {
-		return models.Release{}, fmt.Errorf("fetching releases: %w", err)
-	}
-
-	// TODO: Use if we've received a version parameter and it's not on the page.
-	// log.Println(linkheader.Parse(resp.Header.Get("Link")))
-
-	var releases []models.GitRelease
-	if err = json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return models.Release{}, fmt.Errorf("reading releases: %w", err)
+		return models.Release{}, fmt.Errorf("getting first release: %w", err)
 	}
 
 	if len(releases) == 0 {
@@ -179,7 +174,71 @@ func getRelease(c *http.Client, owner, repo, version string) (models.Release, er
 		}
 	}
 
-	return models.Release{}, fmt.Errorf("no releases found for this os")
+	return models.Release{}, fmt.Errorf("no releases found for %s", runtime.GOOS)
+}
+
+func getVersionedRelease(c *http.Client, owner, repo, version string) (models.Release, error) {
+	page := 1
+	for {
+		var pageReleases []models.GitRelease
+		pageReleases, err := getReleases(c, owner, repo, page, releasesPerPage)
+		if err != nil {
+			return models.Release{}, fmt.Errorf("getting release page %d: %w", page, err)
+		}
+
+		// If this is the first run of the loop, there aren't any releases at all,
+		// otherwise, we've reached the end and not found any releases with the
+		// required version.
+		if len(pageReleases) == 0 {
+			return models.Release{}, models.MakeErrNotFound("no releases for version %s", version)
+		}
+
+		for _, release := range pageReleases {
+			if release.TagName == version {
+				for _, asset := range release.Assets {
+					if strings.HasSuffix(asset.BrowserDownloadURL, "_"+runtime.GOOS) {
+						return models.Release{
+							Version: release.TagName,
+							URL:     asset.BrowserDownloadURL,
+						}, nil
+					}
+				}
+
+				return models.Release{}, fmt.Errorf("no %s installation available", runtime.GOOS)
+			}
+		}
+
+		page++
+	}
+}
+
+func getReleases(c *http.Client, owner, repo string, page, perPage int) ([]models.GitRelease, error) {
+	url := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/releases?per_page=%d&page=%d",
+		owner, repo, perPage, page)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating releases request: %w", err)
+	}
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching releases: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if until, ok := models.ParseRateLimitResetTime(resp.Header); ok {
+			return nil, fmt.Errorf("rate-limit exceeded, try again in %s", until)
+		}
+	}
+
+	var releases []models.GitRelease
+	if err = json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("reading releases: %w", err)
+	}
+
+	return releases, nil
 }
 
 func ensureGrabDir(baseDir string) (state.Config, error) {
