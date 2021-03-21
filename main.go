@@ -134,6 +134,10 @@ func update(c *http.Client, cfg state.Config) func(cmd *cobra.Command, args []st
 
 		current, err := state.GetRelease(cfg.StateFilePath, owner, repo)
 		if err != nil {
+			if errors.As(err, &models.ErrNotFound{}) {
+				log.Printf("package not installed, consider using install instead")
+				return nil
+			}
 			return fmt.Errorf("getting current version: %w", err)
 		}
 
@@ -148,7 +152,7 @@ func update(c *http.Client, cfg state.Config) func(cmd *cobra.Command, args []st
 		if version != "" {
 			// If we've already got this version, bail now.
 			if version == current.Version {
-				log.Printf("version %s is already installed, call udpate without a version to install latest", version)
+				log.Printf("version %s is already installed, call update without a version to install latest", version)
 				return nil
 			}
 
@@ -192,7 +196,7 @@ func remove(cfg state.Config) func(cmd *cobra.Command, args []string) error {
 		// Check for an existing package.
 		release, err := state.GetRelease(cfg.StateFilePath, owner, repo)
 		if err != nil {
-			if errors.Is(err, &models.ErrNotFound{}) {
+			if errors.As(err, &models.ErrNotFound{}) {
 				log.Printf("no installed packages for owner=%q repo=%q", owner, repo)
 				return nil
 			}
